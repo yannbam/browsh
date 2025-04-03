@@ -1,0 +1,728 @@
+# Browsh Development Session - Saved Context
+
+## Original Request
+Human: Hi Claude :)
+You are in the Browsh 1.8.3 git repo.
+I am trying to build Browsh and the web-extension on Ubuntu 24.
+
+SETUP_DEV_LINUX.md says
+### Setting up dependencies
+
+```shell
+browsh=/path/to/browsh
+cd "$browsh/webext"
+npm run get-gobindata
+npm install
+npm run build
+diff -u <(echo -n) <(gofmt -d ./)
+./node_modules/.bin/prettier --list-different "{src,test}/**/*.js"
+```
+
+But there is no get-gobindata script.
+Please find out what the issue is!
+Don't change anything in the code yet.
+
+Thank you!
+
+## Investigation Process
+
+### Initial Review of SETUP_DEV_LINUX.md
+```
+# How to setup the build environment for browsh on a generic Linux system
+
+Install Go, Node.js, and Firefox using your system's package manager.
+**Browsh requires Version 57 or higher.**
+
+Now you should be able to call the *go* and *node* binaries:
+
+```shell
+go version
+node --version
+```
+
+## Install webpack, webpack-cli, & web-ext
+
+```shell
+npm install -g webpack webpack-cli web-ext
+```
+
+## Cloning the browsh repository
+
+It's assumed that you already have *git* installed.
+
+Run this anywhere you want:
+
+```shell
+git clone https://github.com/browsh-org/browsh.git
+```
+
+## Setting up the build environment in the cloned repository
+
+### Setting up dependencies
+
+```shell
+browsh=/path/to/browsh
+cd "$browsh/webext"
+npm run get-gobindata
+npm install
+npm run build
+diff -u <(echo -n) <(gofmt -d ./)
+./node_modules/.bin/prettier --list-different "{src,test}/**/*.js"
+```
+
+### Building browsh
+
+```shell
+cd "$browsh/interfacer"
+go build -o browsh src/main.go
+```
+
+### Building the web extension
+
+In `$browsh/webext`:
+
+```shell
+webpack --watch
+```
+
+This will continuously watch for changes made to the web extension and rebuild it.
+
+## Run firefox and the webextension
+
+In `$browsh/webext/dist`:
+
+```shell
+web-ext run --verbose --firefox path/to/firefox
+```
+
+## Run browsh
+
+```shell
+cd "$browsh/interfacer"
+go run ./cmd/browsh --firefox.use-existing --debug
+```
+
+Or after building:
+
+```shell
+./browsh --firefox.use-existing --debug
+```
+```
+
+### Check of webext/package.json
+```
+{
+  "type": "module",
+  "scripts": {
+    "build:dev": "webpack",
+    "build:watch": "webpack --watch",
+    "lint": "prettier --list-different '{src,test}/**/*.js'",
+    "test": "NODE_PATH=src:test mocha"
+  },
+  "babel": {
+    "presets": [
+      "es2015"
+    ]
+  },
+  "devDependencies": {
+    "babel-eslint": "^8.2.6",
+    "babel-loader": "^8.2.5",
+    "babel-preset-es2015": "^6.24.1",
+    "babel-register": "^6.26.0",
+    "chai": "^4.3.6",
+    "copy-webpack-plugin": "^11.0.0",
+    "eslint": "^8.20.0",
+    "mocha": "^10.0.0",
+    "prettier": "2.7.1",
+    "sinon": "^14.0.0",
+    "strip-ansi": "^7.0.1",
+    "web-ext": "^7.5.0",
+    "webpack": "^5.73.0",
+    "webpack-cli": "^4.10.0"
+  },
+  "dependencies": {
+    "lodash": "^4.17.21",
+    "string-width": "^5.1.2"
+  }
+}
+```
+
+### Check of Control Script (ctl.sh)
+```
+#!/usr/bin/env bash
+set -e
+
+function_to_run=$1
+
+export PROJECT_ROOT
+export GORELEASER_VERSION=1.10.2
+
+PROJECT_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
+
+function _includes_path {
+	echo "$PROJECT_ROOT"/scripts
+}
+
+function _load_includes {
+	for file in "$(_includes_path)"/*.bash; do
+		# shellcheck disable=1090
+		source "$file"
+	done
+}
+
+_load_includes
+
+if [[ $(type -t "$function_to_run") != function ]]; then
+	echo "Subcommand: '$function_to_run' not found."
+	exit 1
+fi
+
+shift
+
+pushd "$PROJECT_ROOT" || _panic
+"$function_to_run" "$@"
+popd || _panic
+```
+
+### Check of Scripts
+#### common.bash
+```
+#!/usr/bin/env bash
+
+# shellcheck disable=2120
+function _panic() {
+	local message=$1
+	echo >&2 "$message"
+	exit 1
+}
+
+function _md5() {
+	local path=$1
+	md5sum "$path" | cut -d' ' -f1
+}
+
+function pushd() {
+	# shellcheck disable=2119
+	command pushd "$@" >/dev/null || _panic
+}
+
+function popd() {
+	# shellcheck disable=2119
+	command popd "$@" >/dev/null || _panic
+}
+```
+
+#### bundling.bash
+```
+#!/usr/bin/env bash
+
+export XPI_PATH="$PROJECT_ROOT"/interfacer/src/browsh/browsh.xpi
+export XPI_SOURCE_DIR=$PROJECT_ROOT/webext/dist/web-ext-artifacts
+export NODE_BIN=$PROJECT_ROOT/webext/node_modules/.bin
+MDN_USER="user:13243312:78"
+
+function versioned_xpi_file() {
+	echo "$XPI_SOURCE_DIR/browsh-$(browsh_version).xpi"
+}
+
+# You'll want to use this with `go run ./cmd/browsh --debug --firefox.use-existing`
+function build_webextension_watch() {
+	"$NODE_BIN"/web-ext run \
+		--firefox contrib/firefoxheadless.sh \
+		--verbose
+}
+
+function build_webextension_production() {
+	local version && version=$(browsh_version)
+
+	cd "$PROJECT_ROOT"/webext && "$NODE_BIN"/webpack
+	cd "$PROJECT_ROOT"/webext/dist && rm ./*.map
+	if [ -f core ]; then
+		# Is this a core dump for some failed process?
+		rm core
+	fi
+	ls -alh .
+	"$NODE_BIN"/web-ext build --overwrite-dest
+	ls -alh web-ext-artifacts
+
+	webextension_sign
+	local source_file && source_file=$(versioned_xpi_file)
+
+	echo "Bundling $source_file to $XPI_PATH"
+	cp -f "$source_file" "$XPI_PATH"
+
+	echo "Making extra copy for Goreleaser to put in Github release:"
+	local goreleaser_pwd="$PROJECT_ROOT"/interfacer/
+	cp -a "$source_file" "$goreleaser_pwd"
+	ls -alh "$goreleaser_pwd"
+}
+
+# It is possible to use unsigned webextensions in Firefox but it requires that Firefox
+# uses problematically insecure config. I know it's a hassle having to jump through all
+# these signing hoops, but I think it's better to use a standard Firefox configuration.
+# Moving away from the webextension alltogether is another story, but something I'm still
+# thinking about.
+#
+# NB: There can only be one canonical XPI for each semantic version.
+#
+# shellcheck disable=2120
+function webextension_sign() {
+	local use_existing=$1
+	if [ "$use_existing" == "" ]; then
+		"$NODE_BIN"/web-ext sign --api-key "$MDN_USER" --api-secret "$MDN_KEY"
+		_rename_built_xpi
+	else
+		echo "Skipping signing, downloading existing webextension"
+		local base="https://github.com/browsh-org/browsh/releases/download"
+		curl -L \
+			-o "$(versioned_xpi_file)" \
+			"$base/v$LATEST_TAGGED_VERSION/browsh-$LATEST_TAGGED_VERSION.xpi"
+	fi
+}
+
+function _rename_built_xpi() {
+	pushd "$XPI_SOURCE_DIR" || _panic
+	local xpi_file
+	xpi_file="$(
+		find ./*.xpi \
+			-printf "%T@ %f\n" |
+			sort |
+			cut -d' ' -f2 |
+			tail -n1
+	)"
+	cp -a "$xpi_file" "$(versioned_xpi_file)"
+	popd || _panic
+}
+
+function bundle_production_webextension() {
+	local version && version=$(browsh_version)
+	local base='https://github.com/browsh-org/browsh/releases/download'
+	local release_url="$base/v$version/browsh-$version.xpi"
+	echo "Downloading webextension from: $release_url"
+	curl -L -o "$XPI_PATH" "$release_url"
+	local size && size=$(wc -c <"$XPI_PATH")
+	if [ "$size" -lt 500 ]; then
+		echo "XPI size seems too small: $size"
+		_panic "Problem downloading latest webextension XPI"
+	fi
+	cp -a "$XPI_PATH" "$(versioned_xpi_file)"
+}
+```
+
+#### misc.bash
+```
+#!/usr/bin/env bash
+
+function golang_lint_check() {
+	pushd "$PROJECT_ROOT"/interfacer || _panic
+	diff -u <(echo -n) <(gofmt -d ./)
+	popd || _panic
+}
+
+function golang_lint_fix() {
+	gofmt -w ./interfacer
+}
+
+function prettier_fix() {
+	pushd "$PROJECT_ROOT"/webext || _panic
+	prettier --write '{src,test}/**/*.js'
+	popd || _panic
+}
+
+function parse_firefox_version_from_ci_config() {
+	local line && line=$(grep 'firefox-version:' <"$PROJECT_ROOT"/.github/workflows/main.yml)
+	local version && version=$(echo "$line" | tr -s ' ' | cut -d ' ' -f 3)
+	[ "$version" = "" ] && _panic "Couldn't parse Firefox version"
+	echo -n "$version"
+}
+
+function install_firefox() {
+	local version && version=$(parse_firefox_version_from_ci_config)
+	local destination=/tmp
+	echo "Installing Firefox v$version to $destination..."
+	mkdir -p "$destination"
+	pushd "$destination" || _panic
+	curl -L -o firefox.tar.bz2 \
+		"https://ftp.mozilla.org/pub/firefox/releases/$version/linux-x86_64/en-US/firefox-$version.tar.bz2"
+	bzip2 -d firefox.tar.bz2
+	tar xf firefox.tar
+	popd || _panic
+}
+
+function parse_golang_version_from_go_mod() {
+	local path=$1
+	[ "$path" = "" ] && _panic "Path to Golang interfacer code not passed"
+	local line && line=$(grep '^go ' <"$path"/go.mod)
+	local version && version=$(echo "$line" | tr -s ' ' | cut -d ' ' -f 2)
+	[ "$(echo "$version" | tr -s ' ')" == "" ] && _panic "Couldn't parse Golang version"
+	echo -n "$version"
+}
+
+function install_golang() {
+	local path=$1
+	[ "$path" = "" ] && _panic "Path to Golang interfacer code not passed"
+	local version && version=$(parse_golang_version_from_go_mod "$path")
+	[ "$GOPATH" = "" ] && _panic "GOPATH not set"
+	[ "$GOROOT" = "" ] && _panic "GOROOT not set"
+	GOARCH=$(uname -m)
+	[[ $GOARCH == aarch64 ]] && GOARCH=arm64
+	[[ $GOARCH == x86_64 ]] && GOARCH=amd64
+	url=https://dl.google.com/go/go"$version".linux-"$GOARCH".tar.gz
+	echo "Installing Golang ($url)... to $GOROOT"
+	curl -L \
+		-o go.tar.gz \
+		"$url"
+	mkdir -p "$GOPATH"/bin
+	mkdir -p "$GOROOT"
+	tar -C "$GOROOT/.." -xzf go.tar.gz
+	go version
+}
+```
+
+### Git History Investigation
+```
+commit 6ccf2afd07235a1ec65680acedbc1c7ec9df6d7a
+Author: Thomas Buckley-Houston <tom@tombh.co.uk>
+Date:   Sat Jul 16 13:57:30 2022 -0400
+
+    devops: Refactor CI to use ctl.sh
+    
+    Also updates our goreleaser setup to work again
+
+diff --git a/.travis.yml b/.travis.yml
+deleted file mode 100644
+index 6dc361f..0000000
+--- a/.travis.yml
++++ /dev/null
+@@ -1,47 +0,0 @@
+-if: tag IS blank
+-language: go
+-go:
+-  - 1.13.x
+-
+-addons:
+-  # Use the full version number with ".0" if needed. This value is scraped by setup scripts.
+-  firefox: "67.0.1"
+-  apt:
+-    packages:
+-      - rpm
+-      - bsdtar
+-      - upx-ucl
+-
+-env:
+-  global:
+-    - REPO_ROOT=$GOPATH/src/browsh
+-    - MDN_USER="user:13243312:78"
+-    # MDN_TOKEN
+-    - secure: "sKZ1/oBLKNWA0v16d4Yg8V500zIwZwEUpcnW7SMRpeqJMbzlR7GKLpJ/VX6ZAYexokBEEbU+JnI3/aHOmJaO9h2/+b1qwrQqje6totC6/rPhxkdxGxI9jETzPdL0V0XErK4rK2URATEANRnJUFLVuFGaXh6dUZDrbtn8NxDSfZEQGmHlqex5TcqPxmK2v0Lb3l2FcVF2kxGYpKMmjKFQbGBHdjFN5qOrS3jmkHjC6Ie8CaM9ezy55e3sOIrNr/u4kWJAOGE2cT3rjqcmPYaCRRzkiy7q3sYEI6jC9vfOZeyFI6E0e3VPDv+OGq+lnUBbgVjGhiG9LxIJ9Z3JEY9z5OspeczpLiQT2rhstqwDolyhx2liiI9cZe0d+uiLo2YyYKe1RELlClB6cQi9p/J8vJpyVEutIoq8Sdv13vbnJMAmPQi1OD9qtOgBR9cngy5yWIPyizgpcAr6kCYxztwIX4y1wrlHPUdTApDnfJNkNOSBwYBTigmlFZf8BkGXB4JOhcQ8KZM3H2OdOP2rANZIOd1ficgyHgKNt4iomIC/i5d7qnV6OZfzirQgx7yzWqjwoGrPg+OvL9MeY9dMltGsfFL80FLudIzN8sqj3BUYioXWX8GCyVML/XoMPbLpcSLBRMxskUhNSYbaTQ2qML7H5Kv/wce71BXMknzyT0s/mNs="
+-    # GITHUB_TOKEN
+-    - secure: "boYctu4EQI2og3YWpD54yo1LzibgBNrYN3exbfwxaNNbJuQscprAlOOG5Y1O7MBgzG9AP1DeON3X0al7g/IYMrsMsrSGhJLq9w2/ntwMiUIyKfTAP8rB5fASRSYxA5mqhpjXK4iIzqG2xiOr1SmCbpT9ew0AXP/HgxQprsppBbH+H4HyrP4cejIbfk8ajU/XvrDmhOY4s/IZIy+vfEfZH5xheJnG3iWFICwWUF5CIjjr6fQpq9ZbL2sDMvzruYPMAQ3iDfBrUr+ZhN4PPjrzvCRUNpoUoPsXCsFDPMcZpBjSHH5ZELPRBzHSdJignIjHaV0UtLtFApZl49lzq749r2Sno2ba4JCd0RIgMERjNluXynkJiHrL2tMR8HYhOmoeLMdX0zrguv+136+Jn04gQde3S+FI1/sN0/Xa14xD7SGMUT1MgFnwKgFXOFeUd3VpvbpFg6RWVgpCnaDd2/AKL+mQDEgL4yRg9q95a6Q5ub/c6nla8/E4asEvYGlJPj0OG/MKvJMi0gnKuP4+nil0jgGeKki3k1UxwvldlS+n7HUhQ7c4B9c61KS19i+z5SxBiXjilL+zGlAVVgRcalIoKQrTRDSRKnKZkR5Ant0CLjt44pncHLwlYXD/aPuLNihCa4AqUlpYPYru0pQawXNkVnk6E/cg2DAsp7oDcpcg540="
+-
+-before_install:
+-  - ./interfacer/contrib/setup_dep.sh
+-  - ./webext/contrib/setup_node.sh
+-  - mkdir -p $REPO_ROOT && cp -rfp $TRAVIS_BUILD_DIR -T $REPO_ROOT
+-install:
+-  - cd $REPO_ROOT/interfacer && dep ensure
+-  - cd $REPO_ROOT/webext
+-  - source ~/.nvm/nvm.sh
+-  - npm run get-gobindata
+-  - npm install
+-  - npm run build
+-  - diff -u <(echo -n) <(gofmt -d ./)
+-  - ./node_modules/.bin/prettier --list-different "{src,test}/**/*.js"
+-script:
+-  - cd $REPO_ROOT/webext && npm test
+-  - cd $REPO_ROOT/interfacer && go test $(find src/browsh -name *.go | grep -v windows)
+-  - cd $REPO_ROOT/interfacer && go test test/tty/*.go -v -ginkgo.slowSpecThreshold=30 -ginkgo.flakeAttempts=3
+-  - cd $REPO_ROOT/interfacer && go test test/http-server/*.go -v -ginkgo.slowSpecThreshold=30 -ginkgo.flakeAttempts=3
+-after_failure:
+-  - cat $REPO_ROOT/interfacer/test/tty/debug.log
+-  - cat $REPO_ROOT/interfacer/test/http-server/debug.log
+-after_success:
+-  - $REPO_ROOT/contrib/release_if_new_version.sh
+-
+```
+
+```
+commit f34ccc73440085f37b44b52be2ada4439823a02a
+Author: Thomas Buckley-Houston <tom@tombh.co.uk>
+Date:   Sat Jul 16 13:56:39 2022 -0400
+
+    devops: Move random scripts into central ctl.sh
+
+diff --git a/interfacer/contrib/build_browsh.sh b/interfacer/contrib/build_browsh.sh
+deleted file mode 100755
+index ee7f0a4..0000000
+--- a/interfacer/contrib/build_browsh.sh
++++ /dev/null
+@@ -1,37 +0,0 @@
+-#!/usr/bin/env bash
+-
+-# This is for building a production version of Browsh.
+-# To build Browsh during development see:
+-#   https://github.com/browsh-org/browsh#contributing
+-
+-# This script depends on Golang, go-bindata and curl
+-
+-set -e
+-
+-INTERFACER_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && cd ../ && pwd)"
+-cd "$INTERFACER_ROOT"
+-
+-# Install the tool to convert the web extenstion file into a Go-compatible binary
+-pushd ../webext
+-npm run get-gobindata
+-popd
+-
+-# Get the current Browsh version, in order to find the corresponding web extension release
+-version_file=$INTERFACER_ROOT/src/browsh/version.go
+-line=$(grep 'browshVersion' <"$version_file")
+-version=$(echo "$line" | grep -o '".*"' | sed 's/"//g')
+-
+-# Build the URI for the webextension file
+-base='https://github.com/browsh-org/browsh/releases/download'
+-release_url="$base/v$version/browsh-$version-an.fx.xpi"
+-
+-xpi_file=$INTERFACER_ROOT/src/browsh/browsh.xpi
+-destination=$INTERFACER_ROOT/src/browsh/webextension.go
+-
+-# Download the web extension
+-curl -L -o "$xpi_file" "$release_url"
+-
+-# Convert the web extension into binary data that can be compiled into a
+-# cross-platform Go binary.
+-XPI_FILE=$xpi_file BIN_FILE=$destination \
+-	"$INTERFACER_ROOT"/contrib/xpi2bin.sh
+diff --git a/webext/package.json b/webext/package.json
+index 07e1135..91fbacb 100644
+--- a/webext/package.json
++++ b/webext/package.json
+@@ -1,7 +1,7 @@
+ {
+   "scripts": {
+-    "get-gobindata": "go install github.com/kevinburke/go-bindata/go-bindata@latest",
+-    "build": "./contrib/bundle_webextension.sh",
++    "build_webextension": "../ctl.sh build_webextension",
++    "lint": "prettier --list-different "{src,test}/**/*.js",
+     "test": "NODE_PATH=src:test mocha"
+   },
+   "babel": {
+```
+
+### Web Extension Analysis
+#### webext/manifest.json
+```
+{
+  "manifest_version": 2,
+  "name": "Browsh",
+  "version": "BROWSH_VERSION",
+
+  "description": "Renders the browser as realtime, interactive, TTY-compatible text",
+
+  "icons": {
+    "48": "assets/icons/browsh-48.png",
+    "96": "assets/icons/browsh-96.png"
+  },
+
+  "background": {
+    "scripts": ["background.js"]
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["*://*/*"],
+      "js": ["content.js"],
+      "css": ["assets/styles.css"],
+      "run_at": "document_start"
+    }
+  ],
+
+  "web_accessible_resources": [
+    "assets/BlockCharMono.ttf",
+    "assets/BlankMono.ttf"
+  ],
+
+  "permissions": [
+    "<all_urls>",
+    "webRequest",
+    "webRequestBlocking",
+    "tabs"
+  ]
+}
+```
+
+#### webext/webpack.config.js
+```
+import webpack from 'webpack';
+import path from 'path';
+import CopyWebpackPlugin from 'copy-webpack-plugin';
+import fs from 'fs';
+
+const dirname = process.cwd();
+
+export default {
+  mode: process.env['BROWSH_ENV'] === 'RELEASE' ? 'production' : 'development',
+  target: 'node',
+  entry: {
+    content: './content.js',
+    background: './background.js'
+  },
+  output: {
+    path: dirname,
+    filename: 'dist/[name].js',
+  },
+  resolve: {
+    modules: [
+      path.resolve(dirname, './src'),
+      'node_modules'
+    ],
+  },
+  module: {
+    rules: [
+      {
+        test: /\.m?js/,
+        resolve: {
+          fullySpecified: false,
+        },
+      },
+    ]
+  },
+  devtool: 'source-map',
+  plugins: [
+    new webpack.DefinePlugin({
+      DEVELOPMENT: JSON.stringify(true),
+      TEST: JSON.stringify(false),
+      // TODO: For production use a different webpack.config.js
+      PRODUCTION: JSON.stringify(false)
+    }),
+    new CopyWebpackPlugin({
+      patterns: [
+        { from: 'assets', to: 'dist/assets' },
+        { from: '.web-extension-id', to: 'dist/' },
+        {
+          from: 'manifest.json', to: 'dist/',
+          // Inject the current Browsh version into the manifest JSON
+          transform(manifest, _) {
+            const version_path = '../interfacer/src/browsh/version.go';
+            let buffer = fs.readFileSync(version_path);
+            let version_contents = buffer.toString();
+            const matches = version_contents.match(/"(.*?)"/);
+            return manifest.toString().replace('BROWSH_VERSION', matches[1]);
+          }
+        },
+      ]
+    })
+  ]
+}
+```
+
+#### webext/background.js & content.js
+```
+// Background.js
+import BackgroundManager from 'background/manager'
+
+new BackgroundManager();
+```
+
+```
+// Content.js
+import DOMManager from 'dom/manager';
+
+new DOMManager();
+```
+
+## Testing the Solution
+Running `./ctl.sh build_webextension_watch` produced this error:
+```
+[/home/jan/src/browsh/webext/node_modules/web-ext/lib/program.js][info] Version: 7.5.0
+[/home/jan/src/browsh/webext/node_modules/web-ext/lib/program.js][debug] Discovering config files. Set --no-config-discovery to disable
+[/home/jan/src/browsh/webext/node_modules/web-ext/lib/config.js][debug] Discovered config "/home/jan/.web-ext-config.js" does not exist or is not readable
+[/home/jan/src/browsh/webext/node_modules/web-ext/lib/config.js][debug] Discovered config "/home/jan/src/browsh/package.json" does not exist or is not readable
+[/home/jan/src/browsh/webext/node_modules/web-ext/lib/config.js][debug] Discovered config "/home/jan/src/browsh/web-ext-config.js" does not exist or is not readable
+[/home/jan/src/browsh/webext/node_modules/web-ext/lib/cmd/run.js][info] Running web extension from /home/jan/src/browsh
+[/home/jan/src/browsh/webext/node_modules/web-ext/lib/util/manifest.js][debug] Validating manifest at /home/jan/src/browsh/manifest.json
+[/home/jan/src/browsh/webext/node_modules/web-ext/lib/program.js][error] 
+InvalidManifest: Could not read manifest.json file at /home/jan/src/browsh/manifest.json: Error: ENOENT: no such file or directory, open '/home/jan/src/browsh/manifest.json'
+    at getValidatedManifest (file:///home/jan/src/browsh/webext/node_modules/web-ext/lib/util/manifest.js:21:11)
+    at async run (file:///home/jan/src/browsh/webext/node_modules/web-ext/lib/cmd/run.js:75:24)
+    at async Program.execute (file:///home/jan/src/browsh/webext/node_modules/web-ext/lib/program.js:265:7)
+    at async file:///home/jan/src/browsh/webext/node_modules/web-ext/bin/web-ext.js:13:1
+
+[/home/jan/src/browsh/webext/node_modules/web-ext/lib/program.js][debug] Command executed: run
+```
+
+When attempting to install go-bindata:
+```
+jan@gaia:~/src/browsh/webext$ go install github.com/kevinburke/go-bindata/go-bindata@latest
+go: downloading github.com/kevinburke/go-bindata v1.1.0
+go: github.com/kevinburke/go-bindata/go-bindata@latest: module github.com/kevinburke/go-bindata@latest found (v1.1.0), but does not contain package github.com/kevinburke/go-bindata/go-bindata
+```
+
+## Root Cause and Solution
+
+The main issues identified:
+
+1. **Missing get-gobindata script**:
+   - The script was defined in package.json as `"get-gobindata": "go install github.com/kevinburke/go-bindata/go-bindata@latest"`
+   - It was removed during refactoring to ctl.sh in July 2022
+   - Correct installation is now: `go install github.com/kevinburke/go-bindata@latest`
+
+2. **ES Module vs CommonJS format**:
+   - The project uses ES modules (import/export) 
+   - Package.json has `"type": "module"`
+   - Firefox expects traditional CommonJS format
+   - Webpack needs to transpile these modules
+
+3. **web-ext path issue**:
+   - web-ext needs to run from the dist directory where webpack outputs bundled files
+   - The ctl.sh script incorrectly runs it from the project root
+   - The correct process is:
+     ```
+     cd ~/src/browsh/webext
+     npm install
+     npx webpack
+     cd dist
+     web-ext run --verbose
+     ```
+
+## Complete Build Process
+1. Install dependencies:
+   ```
+   cd ~/src/browsh/webext
+   npm install
+   ```
+
+2. Build with webpack:
+   ```
+   npx webpack
+   ```
+
+3. Run extension in Firefox:
+   ```
+   cd dist
+   web-ext run --verbose
+   ```
+
+4. Build XPI file:
+   ```
+   cd dist
+   web-ext build
+   ```
+
+5. Install go-bindata:
+   ```
+   go install github.com/kevinburke/go-bindata@latest
+   ```
+
+6. Embed XPI in Go binary:
+   ```
+   cp ~/src/browsh/webext/dist/web-ext-artifacts/*.xpi ~/src/browsh/interfacer/src/browsh/browsh.xpi
+   go-bindata -o ~/src/browsh/interfacer/src/browsh/webextension.go -pkg browsh ~/src/browsh/interfacer/src/browsh/browsh.xpi
+   ```
+
+7. Build the Go binary:
+   ```
+   cd ~/src/browsh/interfacer
+   go build -o browsh cmd/browsh/main.go
+   ```
